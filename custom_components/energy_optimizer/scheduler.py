@@ -117,8 +117,8 @@ def best_hour(scores: dict[int, float]) -> tuple[int, float]:
 
 
 def choose_target_day(day_best: dict[int, tuple[int, float]], urgency_info: UrgencyInfo) -> tuple[int, str]:
-    if 0 not in day_best:
-        return 0, "no forecast available; defaulting to tomorrow"
+    if not day_best:
+        return 1, "No forecast available, defaulting to tomorrow."
 
     base_offset = min(day_best)
     base_hour, base_score = day_best[base_offset]
@@ -136,7 +136,7 @@ def choose_target_day(day_best: dict[int, tuple[int, float]], urgency_info: Urge
     if best_offset == base_offset:
         return base_offset, f"Best fit for tomorrow around {base_hour:02d}:00."
     return best_offset, (
-        f"Waiting {best_offset - base_offset} day(s) for meaningfully better solar coverage."
+        f"Waiting {best_offset - base_offset} day(s) for meaningfully better solar coverage. "
         f"Still within your typical usage interval."
     )
 
