@@ -1,0 +1,72 @@
+accept_suggestion:
+  name: Accept suggestion
+  description: >-
+    Mark the current pending suggestion for this appliance as accepted.
+    Also fires from the notification's Accept action button.
+  target:
+    entity:
+      domain: sensor
+      integration: energy_optimizer
+
+pick_different_time:
+  name: Pick a different time
+  description: >-
+    Mark the current pending suggestion as overridden by the user.
+    Also fires from the notification's Pick different time action button.
+  target:
+    entity:
+      domain: sensor
+      integration: energy_optimizer
+
+force_recompute:
+  name: Force recompute
+  description: >-
+    Immediately re-run the daily scheduling job for all configured
+    appliances, instead of waiting for the scheduled 20:00 run. Useful for
+    testing.
+
+run_backtest:
+  name: Run backtest
+  description: >-
+    Offline walk-forward evaluation: replays every configured appliance's
+    historical runs against the same scheduling logic used in production,
+    using actual (not forecast) solar production as ground truth. Results
+    are logged and posted as a persistent notification with a summary
+    table. Does not affect live suggestions or stored data.
+  fields:
+    solar_energy_entity:
+      name: Solar energy entity
+      description: >-
+        The entity that records actual (measured, not forecast) cumulative
+        PV production with long-term statistics -- e.g. your inverter's
+        total energy sensor. This is different from the solar forecast
+        entity used for live scheduling.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    days:
+      name: History window (days)
+      description: How many days of history to pull for both runs and solar production.
+      required: false
+      default: 90
+      selector:
+        number:
+          min: 14
+          max: 365
+          unit_of_measurement: days
+          mode: box
+    min_history_days:
+      name: Minimum warm-up (days)
+      description: >-
+        Days of appliance-run history to require before the walk-forward
+        evaluation starts scoring days, so early days with little habit
+        data don't skew the results.
+      required: false
+      default: 14
+      selector:
+        number:
+          min: 1
+          max: 90
+          unit_of_measurement: days
+          mode: box

@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add an appliance",
+        "description": "One entry per physical appliance. Add another entry for each additional appliance you want scheduled.",
+        "data": {
+          "name": "Name",
+          "appliance_kind": "Appliance kind",
+          "power_entity": "Power sensor (W)",
+          "energy_entity": "Energy sensor (kWh, optional but recommended for a deeper history backfill)",
+          "solar_forecast_entity": "Solar forecast entity (optional)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This appliance is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Energy Optimizer settings",
+        "data": {
+          "start_threshold_w": "Start threshold (W)",
+          "start_duration_s": "Start confirm duration (s)",
+          "end_threshold_w": "End threshold (W)",
+          "end_duration_s": "End confirm duration (s)",
+          "allowed_window_start": "Earliest allowed start time",
+          "allowed_window_end": "Latest allowed start time",
+          "quiet_hours_start": "Quiet hours start",
+          "quiet_hours_end": "Quiet hours end",
+          "preference_weight": "Habit vs. solar weighting (1 = pure habit, 0 = pure solar)",
+          "notify_targets": "Notify targets",
+          "notify_action": "Custom notification action (advanced)",
+          "fire_events": "Fire bus events for automations"
+        }
+      }
+    }
+  },
+  "selector": {
+    "appliance_kind": {
+      "options": {
+        "dishwasher": "Dishwasher",
+        "washing_machine": "Washing machine",
+        "dryer": "Dryer",
+        "other": "Other"
+      }
+    }
+  }
+}

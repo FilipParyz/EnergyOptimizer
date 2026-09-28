@@ -1,0 +1,20 @@
+{
+  "domain": "energy_optimizer",
+  "name": "Energy Optimizer",
+  "codeowners": [
+    "@FilipParyz"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "recorder"
+  ],
+  "documentation": "https://github.com/FilipParyz/EnergyOptimizer",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/FilipParyz/EnergyOptimizer/issues",
+  "requirements": [
+    "numpy>=1.24.0"
+  ],
+  "version": "0.1.0"
+}

@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Dodaj urządzenie",
+        "description": "Jeden wpis na każde fizyczne urządzenie. Dodaj kolejny wpis dla każdego dodatkowego urządzenia, które ma być planowane.",
+        "data": {
+          "name": "Nazwa",
+          "appliance_kind": "Rodzaj urządzenia",
+          "power_entity": "Czujnik mocy (W)",
+          "energy_entity": "Czujnik energii (kWh, opcjonalny, ale zalecany dla głębszego uzupełnienia historii)",
+          "solar_forecast_entity": "Encja prognozy produkcji PV (opcjonalna)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "To urządzenie jest już skonfigurowane."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Ustawienia Energy Optimizer",
+        "data": {
+          "start_threshold_w": "Próg startu (W)",
+          "start_duration_s": "Czas potwierdzenia startu (s)",
+          "end_threshold_w": "Próg zakończenia (W)",
+          "end_duration_s": "Czas potwierdzenia zakończenia (s)",
+          "allowed_window_start": "Najwcześniejsza dozwolona godzina startu",
+          "allowed_window_end": "Najpóźniejsza dozwolona godzina startu",
+          "quiet_hours_start": "Początek godzin ciszy",
+          "quiet_hours_end": "Koniec godzin ciszy",
+          "preference_weight": "Waga nawyków względem PV (1 = tylko nawyki, 0 = tylko PV)",
+          "notify_targets": "Odbiorcy powiadomień",
+          "notify_action": "Własna akcja powiadomienia (zaawansowane)",
+          "fire_events": "Wysyłaj zdarzenia na magistralę dla automatyzacji"
+        }
+      }
+    }
+  },
+  "selector": {
+    "appliance_kind": {
+      "options": {
+        "dishwasher": "Zmywarka",
+        "washing_machine": "Pralka",
+        "dryer": "Suszarka",
+        "other": "Inne"
+      }
+    }
+  }
+}
