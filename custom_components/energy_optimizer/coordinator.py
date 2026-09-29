@@ -190,6 +190,15 @@ def _config_from_entry(entry: ConfigEntry) -> ApplianceConfig:
     )
 
 
+_FORECAST_VALUE_KEYS: tuple[tuple[str, str, float], ...] = (
+    ("pv_estimate", "power", 1000.0),
+    ("wh", "energy", 1.0),
+    ("value", "energy", 1.0),
+)
+
+_FORECAST_ATTRS = ("detailedHourly", "wh_hours", "detailedForecast", "hourly_forecast", "forecast")
+
+
 def _forecast_curve(hass: HomeAssistant, forecast_entity: str | None, day_offset: int) -> dict[int, float]:
     """Best-effort read of an hourly forecast curve from a forecast entity's
     attributes. Different solar forecast integrations expose this
@@ -202,28 +211,65 @@ def _forecast_curve(hass: HomeAssistant, forecast_entity: str | None, day_offset
         return {}
     today = dt_util.now().date()
 
-    for attr_name in ("wh_hours", "detailedForecast", "detailedHourly", "hourly_forecast", "forecast"):
+    def _local_hour_for_day(ts) -> int | None:
+        parsed = dt_util.parse_datetime(str(ts)) if ts is not None else None
+        if parsed is None:
+            return None
+        local = dt_util.as_local(parsed)
+        if (local.date() - today).days != day_offset:
+            return None
+        return local.hour
+
+    for attr_name in _FORECAST_ATTRS:
         raw = state.attributes.get(attr_name)
 
         if isinstance(raw, dict):
             curve: dict[int, float] = {}
             for key, val in raw.items():
-                parsed = dt_util.parse_datetime(str(key))
-                if parsed and (dt_util.as_local(parsed).date() - today).days == day_offset:
-                    curve[dt_util.as_local(parsed).hour] = float(val)
+                hour = _local_hour_for_day(key)
+                if hour is None or val is None:
+                    continue
+                try:
+                    curve[hour] = curve.get(hour, 0.0) + float(val)
+                except (TypeError, ValueError):
+                    continue
             if curve:
                 return curve
 
         if isinstance(raw, list):
-            curve = {}
+            energy: dict[int, float] = {}
+            power_sum: dict[int, float] = {}
+            power_count: dict[int, int] = {}
             for item in raw:
                 if not isinstance(item, dict):
                     continue
-                ts = item.get("period_start") or item.get("datetime") or item.get("time")
-                val = item.get("pv_estimate") or item.get("value") or item.get("wh")
-                parsed = dt_util.parse_datetime(str(ts)) if ts else None
-                if parsed and val is not None and (dt_util.as_local(parsed).date() - today).days == day_offset:
-                    curve[dt_util.as_local(parsed).hour] = float(val)
+                hour = _local_hour_for_day(
+                    item.get("period_start") or item.get("datetime") or item.get("time")
+                )
+                if hour is None:
+                    continue
+                # `is not None`, not truthiness: a 0 kW night-time value is a
+                # real reading, not a missing one.
+                found = next(
+                    ((item[k], kind, mult) for k, kind, mult in _FORECAST_VALUE_KEYS if item.get(k) is not None),
+                    None,
+                )
+                if found is None:
+                    continue
+                raw_val, kind, mult = found
+                try:
+                    val = float(raw_val) * mult
+                except (TypeError, ValueError):
+                    continue
+                if kind == "power":
+                    power_sum[hour] = power_sum.get(hour, 0.0) + val
+                    power_count[hour] = power_count.get(hour, 0) + 1
+                else:
+                    energy[hour] = energy.get(hour, 0.0) + val
+
+            curve = dict(energy)
+            for hour, total in power_sum.items():
+                curve[hour] = curve.get(hour, 0.0) + total / power_count[hour]
             if curve:
                 return curve
 
