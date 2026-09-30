@@ -9,7 +9,8 @@ from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, Event, ServiceCall
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.event import async_track_time_change
 import homeassistant.util.dt as dt_util
 
@@ -27,22 +28,25 @@ _LOGGER = logging.getLogger(__name__)
 CARD_FILENAME = "energy-optimizer-card.js"
 CARD_URL = f"/{DOMAIN}/{CARD_FILENAME}"
 DATA_CARD_REGISTERED = f"{DOMAIN}_card_registered"
-
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+DATA_UNSUB_MOBILE = "unsub_mobile_action"
 
 async def _async_register_card(hass: HomeAssistant) -> None:
     if hass.data.get(DATA_CARD_REGISTERED):
         return
+    hass.data[DATA_CARD_REGISTERED] = True
     card_path = Path(__file__).parent / "frontend" / CARD_FILENAME
     await hass.http.async_register_static_paths(
         [StaticPathConfig(CARD_URL, str(card_path), cache_headers=False)]
     )
     add_extra_js_url(hass, CARD_URL)
-    hass.data[DATA_CARD_REGISTERED] = True
 
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    await _async_register_card(hass)
+    return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {DATA_RUNTIME: {}})
-    await _async_register_card(hass)
 
     runtime = ApplianceRuntime(hass, entry)
     await runtime.async_setup()
@@ -62,9 +66,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if runtime:
             await runtime.async_unload()
     if not hass.data[DOMAIN][DATA_RUNTIME]:
-        unsub = hass.data[DOMAIN].pop(DATA_UNSUB_DAILY, None)
-        if unsub:
-            unsub()
+        for key in (DATA_UNSUB_DAILY, DATA_UNSUB_MOBILE):
+            unsub = hass.data[DOMAIN].pop(key, None)
+            if unsub:
+                unsub()
     return ok
 
 
@@ -90,8 +95,10 @@ def _async_ensure_shared_jobs(hass: HomeAssistant) -> None:
         elif action.startswith(f"{DOMAIN}_change_"):
             await _change_via_entry_id(hass, action[len(f"{DOMAIN}_change_"):])
 
-    hass.bus.async_listen("mobile_app_notification_action", _handle_mobile_action)
-
+    hass.data[DOMAIN][DATA_UNSUB_MOBILE] = hass.bus.async_listen(
+        "mobile_app_notification_action", _handle_mobile_action
+    )
+    
     async def _accept_service(call: ServiceCall) -> None:
         for entry_id in _entry_ids_from_call(hass, call):
             await _accept_via_entry_id(hass, entry_id)
