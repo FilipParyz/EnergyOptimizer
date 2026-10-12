@@ -2,7 +2,7 @@
 actually accepted versus overridden. Pure NumPy, no external ML framework.
 
 This never runs unless there are enough resolved suggestions to fit AND
-v7alidate a model, and a freshly trained candidate only replaces the
+validate a model, and a freshly trained candidate only replaces the
 previously-promoted model if it beats the plain heuristic's own hit-rate on
 held-out data. If it doesn't clear that bar, the heuristic just keeps
 running untouched -- this module can only ever nudge the final score, never
@@ -66,8 +66,20 @@ def _auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
     return float((rank_sum_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
-def maybe_train_and_promote(examples: list[dict], current_model: dict | None) -> dict | None:
+def maybe_train_and_promote(examples: list[dict], current_model: dict | None,
+                              trace: dict | None = None) -> dict | None:
+    """`trace`, if given, is filled with why the model was or wasn't
+    (re)trained -- used only for debug logging and diagnostics."""
+    if trace is None:
+        trace = {}
+    trace["examples"] = len(examples)
+    trace["labels"] = {
+        "positive": sum(1 for e in examples if e["label"] == 1),
+        "negative": sum(1 for e in examples if e["label"] == 0),
+    }
+
     if len(examples) < MIN_SAMPLES_FOR_ML:
+        trace["outcome"] = f"skipped: {len(examples)} < MIN_SAMPLES_FOR_ML ({MIN_SAMPLES_FOR_ML})"
         return current_model
 
     X = np.array([e["features"] for e in examples])
@@ -78,20 +90,28 @@ def maybe_train_and_promote(examples: list[dict], current_model: dict | None) ->
     X_train, X_hold = X[:split], X[split:]
     y_train, y_hold = y[:split], y[split:]
     heur_hold = heuristic[split:]
+    trace["train_size"] = int(len(X_train))
+    trace["holdout_size"] = int(len(X_hold))
 
     if len(np.unique(y_train)) < 2 or len(X_hold) < 5:
+        trace["outcome"] = "skipped: training set has a single class or hold-out set < 5"
         return current_model
 
     candidate = _train_logistic(X_train, y_train)
     candidate_auc = _auc(y_hold, predict(candidate, X_hold))
     baseline_auc = _auc(y_hold, heur_hold)
+    trace["candidate_auc"] = round(candidate_auc, 4)
+    trace["baseline_auc"] = round(baseline_auc, 4)
+    trace["required_auc"] = round(baseline_auc + ML_AUC_PROMOTION_MARGIN, 4)
 
     if candidate_auc >= baseline_auc + ML_AUC_PROMOTION_MARGIN:
         candidate["promoted"] = True
         candidate["auc"] = candidate_auc
         candidate["baseline_auc"] = baseline_auc
+        trace["outcome"] = "promoted: candidate beats the heuristic"
         return candidate
 
+    trace["outcome"] = "not promoted: candidate doesn't beat the heuristic by the margin"
     return current_model
 
 

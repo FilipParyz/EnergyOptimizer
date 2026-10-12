@@ -20,6 +20,8 @@ MAX_RUNS_KEPT = 500
 MAX_SUGGESTIONS_KEPT = 200
 
 OPEN_STATUSES = ("pending", "accepted")
+SAME_DAY_RECONCILABLE = ("pending", "accepted", "missed")
+
 
 @dataclass
 class RunRecord:
@@ -43,6 +45,7 @@ class SuggestionRecord:
     status: str = "pending"
     actual_start_hour: int | None = None
     resolved_at: str | None = None
+    early_runs: list = field(default_factory=list)
 
 
 class ApplianceStore:
@@ -99,28 +102,44 @@ class ApplianceStore:
         now_iso = dt_util.now().isoformat()
         expired = 0
         for rec in self.suggestions:
-            if rec.status == "pending" and date.fromisoformat(rec.target_date) < today:
-                rec.status = "expired"
+            if rec.status in OPEN_STATUSES and date.fromisoformat(rec.target_date) < today:
+                if rec.early_runs:
+                    rec.status = "missed"
+                    first = dt_util.parse_datetime(rec.early_runs[0])
+                    rec.actual_start_hour = first.hour if first is not None else None
+                else:
+                    rec.status = "expired"
                 rec.resolved_at = now_iso
                 expired += 1
         return expired
 
-    def suggestion_for_cycle(self, cycle_date: date) -> SuggestionRecord | None:
-        day_iso = cycle_date.isoformat()
-        open_recs = [
-            r for r in reversed(self.suggestions)
-            if r.status in OPEN_STATUSES and r.actual_start_hour is None
-        ]
-        for rec in open_recs:
-            if rec.target_date == day_iso:
-                return rec
-        for rec in open_recs:
-            if rec.target_date > day_iso:
-                return rec
+    def same_day_suggestion(self, run_start: datetime) -> SuggestionRecord | None:
+        day_iso = run_start.date().isoformat()
+        for rec in reversed(self.suggestions):
+            if rec.target_date != day_iso or not _created_before(rec, run_start):
+                continue
+            return rec
         return None
+
+    def upcoming_suggestion(self, run_start: datetime) -> SuggestionRecord | None:
+        day_iso = run_start.date().isoformat()
+        candidates = [
+            r for r in self.suggestions
+            if r.status in OPEN_STATUSES and r.target_date > day_iso and _created_before(r, run_start)
+        ]
+        if not candidates:
+            return None
+        nearest_day = min(r.target_date for r in candidates)
+        # If force_recompute produced several for that day, use the newest.
+        return max((r for r in candidates if r.target_date == nearest_day), key=lambda r: r.created_at)
 
     def latest_pending_suggestion(self) -> SuggestionRecord | None:
         for rec in reversed(self.suggestions):
             if rec.status == "pending":
                 return rec
         return None
+
+
+def _created_before(rec: SuggestionRecord, run_start: datetime) -> bool:
+    created = dt_util.parse_datetime(rec.created_at)
+    return created is None or created <= run_start

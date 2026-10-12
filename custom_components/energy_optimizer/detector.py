@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+import logging
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DetectorState(str, Enum):
@@ -30,11 +33,12 @@ class CycleResult:
 
 class CycleDetector:
     def __init__(self, start_threshold_w: float, start_duration_s: float,
-                 end_threshold_w: float, end_duration_s: float):
+                 end_threshold_w: float, end_duration_s: float, name: str | None = None):
         self.start_threshold_w = start_threshold_w
         self.start_duration_s = start_duration_s
         self.end_threshold_w = end_threshold_w
         self.end_duration_s = end_duration_s
+        self.name = name
 
         self.state = DetectorState.IDLE
         self._state_since: datetime | None = None
@@ -42,8 +46,17 @@ class CycleDetector:
         self._energy_wh = 0.0
         self._last_reading: tuple[datetime, float] | None = None
 
+    def _log_transition(self, old: DetectorState, timestamp: datetime, power_w: float, note: str) -> None:
+        if self.name is not None and old != self.state:
+            _LOGGER.debug(
+                "[%s] Detector %s -> %s at %s (%.0f W): %s",
+                self.name, old.value, self.state.value, timestamp.isoformat(), power_w, note,
+            )
+
     def process_reading(self, timestamp: datetime, power_w: float) -> CycleResult | None:
         result: CycleResult | None = None
+        old_state = self.state
+        note = ""
 
         if self._last_reading is not None and self.state in (
             DetectorState.STARTING, DetectorState.RUNNING, DetectorState.ENDING,
@@ -59,24 +72,29 @@ class CycleDetector:
                 self._state_since = timestamp
                 self._cycle_start = timestamp
                 self._energy_wh = 0.0
+                note = f">= start threshold {self.start_threshold_w} W, confirming for {self.start_duration_s} s"
 
         elif self.state == DetectorState.STARTING:
             if power_w < self.start_threshold_w:
                 self.state = DetectorState.IDLE
                 self._state_since = None
                 self._cycle_start = None
+                note = "dropped below start threshold before confirmation -- false start"
             elif (timestamp - self._state_since).total_seconds() >= self.start_duration_s:
                 self.state = DetectorState.RUNNING
+                note = f"cycle confirmed, started at {self._cycle_start.isoformat()}"
 
         elif self.state == DetectorState.RUNNING:
             if power_w < self.end_threshold_w:
                 self.state = DetectorState.ENDING
                 self._state_since = timestamp
+                note = f"< end threshold {self.end_threshold_w} W, confirming for {self.end_duration_s} s"
 
         elif self.state == DetectorState.ENDING:
             if power_w >= self.end_threshold_w:
                 self.state = DetectorState.RUNNING
                 self._state_since = None
+                note = "power came back -- pause within the same cycle"
             elif (timestamp - self._state_since).total_seconds() >= self.end_duration_s:
                 end_time = self._state_since  # power actually dropped here, not "now"
                 duration_s = (end_time - self._cycle_start).total_seconds()
@@ -90,6 +108,8 @@ class CycleDetector:
                 self._state_since = None
                 self._cycle_start = None
                 self._energy_wh = 0.0
+                note = f"cycle ended: {duration_s / 60:.0f} min, {result.energy_wh:.0f} Wh"
 
         self._last_reading = (timestamp, power_w)
+        self._log_transition(old_state, timestamp, power_w, note)
         return result

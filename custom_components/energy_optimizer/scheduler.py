@@ -153,7 +153,10 @@ class ApplianceCandidate:
 
 
 def joint_schedule(candidates: list[ApplianceCandidate], forecast_watts: dict[int, float],
-                     capacity_slack: float = CAPACITY_SLACK) -> dict[str, tuple[int, float]]:
+                     capacity_slack: float = CAPACITY_SLACK,
+                     trace: list | None = None) -> dict[str, tuple[int, float]]:
+    """`trace`, if given, gets one dict per assigned appliance (in assignment
+    order) with the per-hour penalties -- debug/diagnostics only."""
     remaining = {h: w * capacity_slack for h, w in forecast_watts.items()}
     ordered = sorted(candidates, key=lambda c: c.urgency, reverse=True)
     assignment: dict[str, tuple[int, float]] = {}
@@ -164,15 +167,31 @@ def joint_schedule(candidates: list[ApplianceCandidate], forecast_watts: dict[in
             continue
         span = max(1, round(cand.duration_hours))
         best_h, best_adj = None, float("-inf")
+        per_hour: dict[int, dict[str, float]] = {}
         for h, s in scores.items():
             window = [(h + i) % 24 for i in range(span)]
             overflow = sum(max(0.0, cand.avg_power_w - remaining.get(w, 0.0)) for w in window)
             penalty = overflow / max(cand.avg_power_w, 1.0) * 0.5
             adj = s - penalty
+            if trace is not None:
+                per_hour[int(h)] = {"score": round(s, 4), "penalty": round(penalty, 4), "adjusted": round(adj, 4)}
             if adj > best_adj:
                 best_adj, best_h = adj, h
         if best_h is not None:
             assignment[cand.entry_id] = (best_h, best_adj)
+            if trace is not None:
+                trace.append({
+                    "entry_id": cand.entry_id,
+                    "name": cand.name,
+                    "urgency": round(cand.urgency, 4),
+                    "span_hours": span,
+                    "remaining_solar_wh_before": {int(k): round(v, 1) for k, v in sorted(remaining.items())},
+                    "per_hour": per_hour,
+                    "chosen_hour": best_h,
+                    "score": per_hour[int(best_h)]["score"],
+                    "penalty": per_hour[int(best_h)]["penalty"],
+                    "adjusted_score": round(best_adj, 4),
+                })
             for i in range(span):
                 w = (best_h + i) % 24
                 remaining[w] = max(0.0, remaining.get(w, 0.0) - cand.avg_power_w)
