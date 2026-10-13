@@ -1,4 +1,8 @@
 """Helpers for debug logging and the diagnostics trace.
+
+Nothing here changes behaviour -- it only formats intermediate values so
+they are readable in the Home Assistant log and JSON-serialisable for the
+"Download diagnostics" button.
 """
 from __future__ import annotations
 

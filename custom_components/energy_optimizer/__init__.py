@@ -14,11 +14,11 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.event import async_track_time_change
 import homeassistant.util.dt as dt_util
 
-from . import backtest, scheduler
+from . import backfill, backtest, scheduler
 from .const import (
     DOMAIN, PLATFORMS, DATA_RUNTIME, DATA_UNSUB_DAILY,
     SERVICE_ACCEPT_SUGGESTION, SERVICE_PICK_DIFFERENT_TIME, SERVICE_FORCE_RECOMPUTE,
-    SERVICE_RUN_BACKTEST,
+    SERVICE_RUN_BACKTEST, SERVICE_RERUN_BACKFILL,
     EVENT_SUGGESTION_ACCEPTED, EVENT_SUGGESTION_OVERRIDDEN,
 )
 from .coordinator import ApplianceRuntime, async_run_daily_scheduling, _typical_duration_hours, _typical_power_w
@@ -30,6 +30,7 @@ CARD_URL = f"/{DOMAIN}/{CARD_FILENAME}"
 DATA_CARD_REGISTERED = f"{DOMAIN}_card_registered"
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 DATA_UNSUB_MOBILE = "unsub_mobile_action"
+BACKFILL_MODES = ("replace", "merge")
 
 async def _async_register_card(hass: HomeAssistant) -> None:
     if hass.data.get(DATA_CARD_REGISTERED):
@@ -41,9 +42,11 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     )
     add_extra_js_url(hass, CARD_URL)
 
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     await _async_register_card(hass)
     return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {DATA_RUNTIME: {}})
@@ -98,7 +101,7 @@ def _async_ensure_shared_jobs(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][DATA_UNSUB_MOBILE] = hass.bus.async_listen(
         "mobile_app_notification_action", _handle_mobile_action
     )
-    
+
     async def _accept_service(call: ServiceCall) -> None:
         for entry_id in _entry_ids_from_call(hass, call):
             await _accept_via_entry_id(hass, entry_id)
@@ -113,10 +116,14 @@ def _async_ensure_shared_jobs(hass: HomeAssistant) -> None:
     async def _backtest_service(call: ServiceCall) -> None:
         await _run_backtest_service(hass, call)
 
+    async def _rerun_backfill_service(call: ServiceCall) -> None:
+        await _run_rerun_backfill_service(hass, call)
+
     hass.services.async_register(DOMAIN, SERVICE_ACCEPT_SUGGESTION, _accept_service)
     hass.services.async_register(DOMAIN, SERVICE_PICK_DIFFERENT_TIME, _pick_service)
     hass.services.async_register(DOMAIN, SERVICE_FORCE_RECOMPUTE, _recompute_service)
     hass.services.async_register(DOMAIN, SERVICE_RUN_BACKTEST, _backtest_service)
+    hass.services.async_register(DOMAIN, SERVICE_RERUN_BACKFILL, _rerun_backfill_service)
 
 
 def _entry_ids_from_call(hass: HomeAssistant, call: ServiceCall) -> list[str]:
@@ -157,6 +164,55 @@ async def _change_via_entry_id(hass: HomeAssistant, entry_id: str) -> None:
     await runtime.store.async_save()
     if runtime.config.fire_events:
         hass.bus.async_fire(EVENT_SUGGESTION_OVERRIDDEN, {"entry_id": entry_id, "name": runtime.config.name})
+
+
+async def _run_rerun_backfill_service(hass: HomeAssistant, call: ServiceCall) -> None:
+    runtimes: dict[str, ApplianceRuntime] = hass.data.get(DOMAIN, {}).get(DATA_RUNTIME, {})
+    entry_ids = _entry_ids_from_call(hass, call) or list(runtimes)
+    source = call.data.get("source", backfill.SOURCE_AUTO)
+    mode = call.data.get("mode", "replace")
+    days = call.data.get("days")
+    days = int(days) if days else None
+
+    if source not in backfill.SOURCES or mode not in BACKFILL_MODES:
+        persistent_notification.async_create(
+            hass,
+            f"Invalid arguments: source must be one of {', '.join(backfill.SOURCES)}, "
+            f"mode one of {', '.join(BACKFILL_MODES)}.",
+            title="Energy Optimizer: backfill not run",
+            notification_id=f"{DOMAIN}_backfill_result",
+        )
+        return
+
+    rows: list[str] = []
+    for entry_id in entry_ids:
+        runtime = runtimes.get(entry_id)
+        if runtime is None:
+            continue
+        try:
+            s = await runtime.async_rerun_backfill(source=source, days=days, mode=mode)
+        except ValueError as err:  # e.g. source=binary_sensor with none configured
+            rows.append(f"| {runtime.config.name} | {source} | - | - | - | - | - | {err} |")
+            continue
+        except Exception as err:  # keep going for the other appliances
+            _LOGGER.exception("%s: rerun_backfill failed", runtime.config.name)
+            rows.append(f"| {runtime.config.name} | {source} | - | - | - | - | - | error: {err} |")
+            continue
+        rows.append(
+            f"| {s['name']} | {s['source']} | {s['window_start'][:10]} | {s['found']} | {s['removed']} | "
+            f"{s['added']} | {s['skipped_overlap']} / {s['skipped_short']} | {s['total_runs']} |"
+        )
+
+    header = (
+        f"Mode: **{mode}**. Run `energy_optimizer.force_recompute` to refresh today's suggestions.\n\n"
+        "| Appliance | Source | Window from | Found | Removed | Added | Skipped (overlap / <10 min) | Runs now |\n"
+        "|---|---|---|---|---|---|---|---|"
+    )
+    persistent_notification.async_create(
+        hass, header + "\n" + "\n".join(rows or ["| - | - | - | - | - | - | - | no appliances |"]),
+        title="Energy Optimizer: backfill results",
+        notification_id=f"{DOMAIN}_backfill_result",
+    )
 
 
 def _distinct_run_days(runs) -> int:
@@ -213,7 +269,7 @@ async def _run_backtest_service(hass: HomeAssistant, call: ServiceCall) -> None:
             continue
 
         duration_hours = _typical_duration_hours(runtime.store.runs, cfg.kind)
-        avg_power_w = _typical_power_w(runtime.store.runs, duration_hours)
+        avg_power_w = _typical_power_w(runtime.store.runs, duration_hours, cfg.kind)
         run_days = _distinct_run_days(runtime.store.runs)
 
         results = backtest.backtest_appliance(

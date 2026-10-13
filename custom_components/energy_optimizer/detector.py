@@ -9,7 +9,7 @@ readings in order), so detection logic never diverges between the two.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 import logging
 
@@ -45,6 +45,15 @@ class CycleDetector:
         self._cycle_start: datetime | None = None
         self._energy_wh = 0.0
         self._last_reading: tuple[datetime, float] | None = None
+
+    def next_deadline(self) -> datetime | None:
+        if self._state_since is None:
+            return None
+        if self.state == DetectorState.STARTING:
+            return self._state_since + timedelta(seconds=self.start_duration_s)
+        if self.state == DetectorState.ENDING:
+            return self._state_since + timedelta(seconds=self.end_duration_s)
+        return None
 
     def _log_transition(self, old: DetectorState, timestamp: datetime, power_w: float, note: str) -> None:
         if self.name is not None and old != self.state:

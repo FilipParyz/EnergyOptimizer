@@ -28,11 +28,18 @@ CONF_FIRE_EVENTS = "fire_events"
 CONF_BINARY_ENTITY = "binary_entity"
 
 APPLIANCE_KINDS = {
-    "dishwasher": {"icon": "mdi:dishwasher", "default_duration_min": 120},
-    "washing_machine": {"icon": "mdi:washing-machine", "default_duration_min": 100},
-    "dryer": {"icon": "mdi:tumble-dryer", "default_duration_min": 60},
-    "other": {"icon": "mdi:power-plug", "default_duration_min": 90},
+    "dishwasher": {"icon": "mdi:dishwasher", "default_duration_min": 120,
+                   "max_duration_min": 360, "default_power_w": 500},
+    "washing_machine": {"icon": "mdi:washing-machine", "default_duration_min": 100,
+                        "max_duration_min": 300, "default_power_w": 500},
+    "dryer": {"icon": "mdi:tumble-dryer", "default_duration_min": 60,
+              "max_duration_min": 300, "default_power_w": 800},
+    "other": {"icon": "mdi:power-plug", "default_duration_min": 90,
+              "max_duration_min": 480, "default_power_w": 500},
 }
+
+MIN_RUN_DURATION_MIN = 10
+RUNNING_REFRESH_S = 300
 
 DEFAULT_START_THRESHOLD_W = 15.0
 DEFAULT_START_DURATION_S = 20
@@ -64,6 +71,7 @@ SERVICE_ACCEPT_SUGGESTION = "accept_suggestion"
 SERVICE_PICK_DIFFERENT_TIME = "pick_different_time"
 SERVICE_FORCE_RECOMPUTE = "force_recompute"
 SERVICE_RUN_BACKTEST = "run_backtest"
+SERVICE_RERUN_BACKFILL = "rerun_backfill"
 
 DATA_RUNTIME = "runtime"
 DATA_UNSUB_DAILY = "unsub_daily_job"

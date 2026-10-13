@@ -1,25 +1,25 @@
-"""One-time historical backfill, run once per appliance on first setup.
+"""Historical backfill: run once per appliance on first setup, and again on
+demand via the energy_optimizer.rerun_backfill service (e.g. after the
+detection thresholds were tuned in the options flow).
 
-Tries three sources, in order of how much history they can actually give
-us and how reliably they reflect real "was the appliance running" events:
+Sources, tried in this order by source="auto":
 
 1. long-term statistics on the energy sensor (hourly resolution, kept
    indefinitely) -- deepest history, when it exists.
 2. a dedicated "is running" binary sensor, if one is configured -- raw
    state history (purged after ~10 days by default, same ceiling as #3),
-   but every on/off transition is an unambiguous, complete cycle: no
-   threshold tuning involved, and no per-reading detector state that a
-   Home Assistant restart could lose mid-cycle.
+   but every on/off transition is an unambiguous, complete cycle. Energy is
+   filled in from the power sensor's history over the same window.
 3. raw power-sensor state history replayed through the same CycleDetector
-   used for live tracking -- last resort, same ~10 day ceiling as #2, and
-   only as good as the configured power thresholds.
+   used for live tracking -- same ~10 day ceiling, and the only source the
+   configured start/end thresholds actually apply to.
 
 Backfilled and live-tracked runs share the same CycleResult shape either
 way, so downstream code never needs to know which path produced them.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
 from homeassistant.core import HomeAssistant
@@ -30,11 +30,18 @@ from homeassistant.components.recorder.statistics import (
 )
 import homeassistant.util.dt as dt_util
 
-from .detector import CycleDetector, CycleResult
+from .const import RUNNING_REFRESH_S
+from .detector import CycleDetector, CycleResult, DetectorState
 
 _LOGGER = logging.getLogger(__name__)
 
 IDLE_ENERGY_WH = 5.0
+
+SOURCE_AUTO = "auto"
+SOURCE_ENERGY = "energy_statistics"
+SOURCE_BINARY = "binary_sensor"
+SOURCE_POWER = "power_history"
+SOURCES = (SOURCE_AUTO, SOURCE_ENERGY, SOURCE_BINARY, SOURCE_POWER)
 
 
 def _to_local_dt(value):
@@ -46,38 +53,57 @@ def _to_local_dt(value):
 async def backfill_runs(hass: HomeAssistant, power_entity: str, energy_entity: str | None,
                           detector_config: dict, binary_entity: str | None = None,
                           lookback_days_stats: int = 180, lookback_days_raw: int = 9) -> list[CycleResult]:
-    if energy_entity:
-        runs = await _backfill_from_statistics(hass, energy_entity, lookback_days_stats)
-        if runs:
-            return runs
+    _source, runs, _window_start = await backfill_runs_with_source(
+        hass, power_entity, energy_entity, detector_config, binary_entity,
+        source=SOURCE_AUTO, lookback_days_stats=lookback_days_stats, lookback_days_raw=lookback_days_raw,
+    )
+    return runs
+
+
+async def backfill_runs_with_source(
+    hass: HomeAssistant, power_entity: str, energy_entity: str | None, detector_config: dict,
+    binary_entity: str | None = None, source: str = SOURCE_AUTO,
+    lookback_days_stats: int = 180, lookback_days_raw: int = 9,
+) -> tuple[str, list[CycleResult], datetime]:
+    now = dt_util.utcnow()
+    stats_start = now - timedelta(days=lookback_days_stats)
+    raw_start = now - timedelta(days=lookback_days_raw)
+
+    if source == SOURCE_ENERGY or (source == SOURCE_AUTO and energy_entity):
+        if not energy_entity:
+            raise ValueError("source=energy_statistics needs an energy sensor in the appliance config")
+        runs = await _backfill_from_statistics(hass, energy_entity, stats_start, now)
+        if runs or source == SOURCE_ENERGY:
+            return SOURCE_ENERGY, runs, stats_start
         _LOGGER.info(
-            "No long-term statistics found for %s yet; trying the next available source.",
-            energy_entity,
+            "No long-term statistics found for %s yet; trying the next available source.", energy_entity,
         )
 
-    if binary_entity:
-        runs = await _backfill_from_binary_sensor(hass, binary_entity, lookback_days_raw)
+    if source == SOURCE_BINARY or (source == SOURCE_AUTO and binary_entity):
+        if not binary_entity:
+            raise ValueError("source=binary_sensor needs a binary sensor in the appliance options")
+        runs = await _backfill_from_binary_sensor(hass, binary_entity, raw_start, now)
         if runs:
-            return runs
+            await _attach_energy_from_power(hass, power_entity, runs, raw_start, now)
+        if runs or source == SOURCE_BINARY:
+            return SOURCE_BINARY, runs, raw_start
         _LOGGER.info(
             "No on/off history found for %s in the last %d days either; falling back to "
-            "raw power-threshold detection.",
-            binary_entity, lookback_days_raw,
+            "raw power-threshold detection.", binary_entity, lookback_days_raw,
         )
 
-    if not energy_entity and not binary_entity:
+    if source == SOURCE_AUTO and not energy_entity and not binary_entity:
         _LOGGER.info(
             "No energy_entity or binary_entity configured; using raw power-threshold "
             "detection, which only covers the last %d days and depends on the configured "
-            "start/end thresholds. Consider adding a Utility Meter/Riemann sum helper on "
-            "the power sensor, or a dedicated 'is running' binary sensor, for better "
-            "backfills next time.",
-            lookback_days_raw,
+            "start/end thresholds.", lookback_days_raw,
         )
-    return await _backfill_from_raw_states(hass, power_entity, detector_config, lookback_days_raw)
+    runs = await _backfill_from_raw_states(hass, power_entity, detector_config, raw_start, now)
+    return SOURCE_POWER, runs, raw_start
 
 
-async def _backfill_from_statistics(hass: HomeAssistant, energy_entity: str, days: int) -> list[CycleResult]:
+async def _backfill_from_statistics(hass: HomeAssistant, energy_entity: str,
+                                      start: datetime, end: datetime) -> list[CycleResult]:
     meta_list = await get_instance(hass).async_add_executor_job(
         list_statistic_ids, hass, {energy_entity}
     )
@@ -89,8 +115,6 @@ async def _backfill_from_statistics(hass: HomeAssistant, energy_entity: str, day
     # Hourly bucket values are treated as Wh for that hour; convert kWh sources.
     to_wh = 1000.0 if unit == "kWh" else 1.0
 
-    end = dt_util.utcnow()
-    start = end - timedelta(days=days)
     stats = await get_instance(hass).async_add_executor_job(
         statistics_during_period, hass, start, end, {energy_entity}, "hour", None, {"sum"},
     )
@@ -137,9 +161,8 @@ async def _backfill_from_statistics(hass: HomeAssistant, energy_entity: str, day
     return runs
 
 
-async def _backfill_from_binary_sensor(hass: HomeAssistant, binary_entity: str, days: int) -> list[CycleResult]:
-    end = dt_util.utcnow()
-    start = end - timedelta(days=days)
+async def _backfill_from_binary_sensor(hass: HomeAssistant, binary_entity: str,
+                                         start: datetime, end: datetime) -> list[CycleResult]:
     result = await get_instance(hass).async_add_executor_job(
         history.state_changes_during_period, hass, start, end, binary_entity,
     )
@@ -162,23 +185,61 @@ async def _backfill_from_binary_sensor(hass: HomeAssistant, binary_entity: str, 
     return runs
 
 
-async def _backfill_from_raw_states(hass: HomeAssistant, power_entity: str,
-                                      detector_config: dict, days: int) -> list[CycleResult]:
-    end = dt_util.utcnow()
-    start = end - timedelta(days=days)
+async def _power_readings(hass: HomeAssistant, power_entity: str,
+                            start: datetime, end: datetime) -> list[tuple[datetime, float]]:
     result = await get_instance(hass).async_add_executor_job(
         history.state_changes_during_period, hass, start, end, power_entity,
     )
-    states = result.get(power_entity, [])
+    readings = []
+    for state in result.get(power_entity, []):
+        try:
+            readings.append((dt_util.as_utc(state.last_changed), float(state.state)))
+        except (TypeError, ValueError):
+            continue  # unavailable / unknown
+    return readings
 
+
+async def _attach_energy_from_power(hass: HomeAssistant, power_entity: str, runs: list[CycleResult],
+                                      start: datetime, end: datetime) -> None:
+    readings = await _power_readings(hass, power_entity, start, end)
+    if not readings:
+        return
+    for run in runs:
+        energy_wh = 0.0
+        for i, (ts, watts) in enumerate(readings):
+            seg_end = readings[i + 1][0] if i + 1 < len(readings) else end
+            lo, hi = max(ts, run.start_time), min(seg_end, run.end_time)
+            if hi > lo:
+                energy_wh += watts * (hi - lo).total_seconds() / 3600
+        run.energy_wh = energy_wh
+
+
+def _advance_without_readings(detector: CycleDetector, until: datetime, power_w: float,
+                                runs: list[CycleResult]) -> None:
+    while True:
+        deadline = detector.next_deadline()
+        if deadline is None and detector.state == DetectorState.RUNNING and detector._last_reading:
+            deadline = detector._last_reading[0] + timedelta(seconds=RUNNING_REFRESH_S)
+        if deadline is None or deadline >= until:
+            return
+        result = detector.process_reading(deadline, power_w)
+        if result:
+            runs.append(result)
+
+
+async def _backfill_from_raw_states(hass: HomeAssistant, power_entity: str, detector_config: dict,
+                                      start: datetime, end: datetime) -> list[CycleResult]:
+    readings = await _power_readings(hass, power_entity, start, end)
     detector = CycleDetector(**detector_config)
     runs: list[CycleResult] = []
-    for state in states:
-        try:
-            power_w = float(state.state)
-        except (TypeError, ValueError):
-            continue
-        res = detector.process_reading(dt_util.as_utc(state.last_changed), power_w)
-        if res:
-            runs.append(res)
+    last_w: float | None = None
+    for ts, watts in readings:
+        if last_w is not None:
+            _advance_without_readings(detector, ts, last_w, runs)
+        result = detector.process_reading(ts, watts)
+        if result:
+            runs.append(result)
+        last_w = watts
+    if last_w is not None:
+        _advance_without_readings(detector, end, last_w, runs)
     return runs

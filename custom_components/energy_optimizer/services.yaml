@@ -70,3 +70,59 @@ run_backtest:
           max: 90
           unit_of_measurement: days
           mode: box
+
+rerun_backfill:
+  name: Rerun backfill
+  description: >-
+    Rebuild the historical runs with the appliance's CURRENT configuration --
+    use after tuning the detection thresholds, or to fill a gap while live
+    tracking was not working. Live-tracked runs are never removed. Results
+    are posted as a persistent notification; call force_recompute afterwards
+    to refresh the suggestions.
+  target:
+    entity:
+      domain: sensor
+      integration: energy_optimizer
+  fields:
+    source:
+      name: Source
+      description: >-
+        Where to read history from. "auto" picks energy statistics, then the
+        binary sensor, then power history. Only "power_history" applies the
+        start/end thresholds and confirmation times from the options.
+      required: false
+      default: auto
+      selector:
+        select:
+          options:
+            - auto
+            - energy_statistics
+            - binary_sensor
+            - power_history
+    mode:
+      name: Mode
+      description: >-
+        "replace" drops the backfilled runs inside the re-examined window and
+        detects them again (after changing thresholds). "merge" keeps
+        everything and only adds runs that don't overlap an existing one
+        (to fill a gap).
+      required: false
+      default: replace
+      selector:
+        select:
+          options:
+            - replace
+            - merge
+    days:
+      name: History window (days)
+      description: >-
+        How far back to look. Defaults to 9 days for the binary sensor and
+        power history (the recorder keeps ~10 days of raw states) and 180
+        days for energy statistics.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+          mode: box

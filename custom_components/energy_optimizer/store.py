@@ -85,6 +85,13 @@ class ApplianceStore:
 
     def add_suggestion(self, target_date, suggested_hour, expected_coverage_pct,
                         confidence, basis, features=None, heuristic_score=0.0) -> SuggestionRecord:
+        carried_early_runs: list = []
+        now_iso = dt_util.now().isoformat()
+        for old in self.suggestions:
+            if old.target_date == target_date.isoformat() and old.status == "pending":
+                old.status = "replaced"
+                old.resolved_at = now_iso
+                carried_early_runs.extend(r for r in old.early_runs if r not in carried_early_runs)
         rec = SuggestionRecord(
             target_date=target_date.isoformat(),
             suggested_hour=suggested_hour,
@@ -94,6 +101,7 @@ class ApplianceStore:
             created_at=dt_util.now().isoformat(),
             features=features or [],
             heuristic_score=heuristic_score,
+            early_runs=carried_early_runs,
         )
         self.suggestions.append(rec)
         return rec
@@ -114,6 +122,8 @@ class ApplianceStore:
         return expired
 
     def same_day_suggestion(self, run_start: datetime) -> SuggestionRecord | None:
+        """The suggestion for the run's own day, created before the run
+        started, that a run can still resolve (see SAME_DAY_RECONCILABLE)."""
         day_iso = run_start.date().isoformat()
         for rec in reversed(self.suggestions):
             if rec.target_date != day_iso or not _created_before(rec, run_start):

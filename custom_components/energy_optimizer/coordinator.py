@@ -5,13 +5,13 @@ jointly assigns them against a shared solar budget.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, Event, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_track_point_in_utc_time, async_track_state_change_event
 import homeassistant.util.dt as dt_util
 
 from . import scheduler, ml, backfill
@@ -25,10 +25,10 @@ from .const import (
     DEFAULT_END_DURATION_S, DEFAULT_ALLOWED_START, DEFAULT_ALLOWED_END,
     DEFAULT_QUIET_START, DEFAULT_QUIET_END, DEFAULT_PREF_WEIGHT,
     EVENT_CYCLE_ENDED, EVENT_SUGGESTION_READY, SIGNAL_RECOMMENDATION_UPDATED,
-    APPLIANCE_KINDS, MAX_LOOKAHEAD_DAYS, DATA_RUNTIME,
+    APPLIANCE_KINDS, MAX_LOOKAHEAD_DAYS, DATA_RUNTIME, MIN_RUN_DURATION_MIN, RUNNING_REFRESH_S,
 )
 from .debug import fmt_hours, rounded
-from .detector import CycleDetector
+from .detector import CycleDetector, DetectorState
 from .store import ApplianceStore, SAME_DAY_RECONCILABLE
 from .notify_rules import async_notify
 
@@ -77,6 +77,8 @@ class ApplianceRuntime:
         self.last_trace: dict | None = None
         self.last_cycle_trace: dict | None = None
         self._unsub_state = None
+        self._unsub_tick = None
+        self._last_power_w: float | None = None
 
     async def async_setup(self) -> None:
         await self.store.async_load()
@@ -91,60 +93,148 @@ class ApplianceRuntime:
         self._unsub_state = async_track_state_change_event(
             self.hass, [self.config.power_entity], self._handle_power_change
         )
+        current = self.hass.states.get(self.config.power_entity)
+        power_w = _parse_power(current.state if current else None)
+        if power_w is not None:
+            _LOGGER.debug("[%s] Initial power reading: %.0f W", self.config.name, power_w)
+            self._feed_reading(dt_util.utcnow(), power_w)
         if not self.store.backfill_done:
             self.hass.async_create_task(self._async_backfill())
 
     async def async_unload(self) -> None:
         if self._unsub_state:
             self._unsub_state()
+        self._cancel_tick()
 
     async def _async_backfill(self) -> None:
+        """First-setup backfill: automatic source, replaces nothing live."""
         try:
-            runs = await backfill.backfill_runs(
-                self.hass, self.config.power_entity, self.config.energy_entity,
-                detector_config={
-                    "start_threshold_w": self.config.start_threshold_w,
-                    "start_duration_s": self.config.start_duration_s,
-                    "end_threshold_w": self.config.end_threshold_w,
-                    "end_duration_s": self.config.end_duration_s,
-                },
-                binary_entity=self.config.binary_entity,
-            )
-            self.store.runs = [r for r in self.store.runs if r.source != "backfill"]
-            for run in runs:
-                self.store.add_run(run.start_time, run.end_time, run.duration_s, run.energy_wh, source="backfill")
-            self.store.backfill_done = True
-            await self.store.async_save()
-            _LOGGER.info("%s: backfilled %d historical run(s)", self.config.name, len(runs))
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                for run in runs:
-                    _LOGGER.debug(
-                        "[%s] backfill run: %s -> %s, %.0f min, %.0f Wh",
-                        self.config.name, dt_util.as_local(run.start_time).isoformat(),
-                        dt_util.as_local(run.end_time).isoformat(), run.duration_s / 60, run.energy_wh,
-                    )
-            async_dispatcher_send(self.hass, f"{SIGNAL_RECOMMENDATION_UPDATED}_{self.entry.entry_id}")
+            summary = await self.async_rerun_backfill(source=backfill.SOURCE_AUTO, days=None, mode="replace")
+            _LOGGER.info("%s: backfilled %d historical run(s) from %s",
+                         self.config.name, summary["added"], summary["source"])
         except Exception:
             _LOGGER.exception(
                 "%s: historical backfill failed; continuing with live tracking only", self.config.name
             )
 
+    async def async_rerun_backfill(self, source: str = "auto", days: int | None = None,
+                                     mode: str = "replace") -> dict:
+        cfg = self.config
+        raw_days = days or 9
+        stats_days = days or 180
+        used_source, runs, window_start = await backfill.backfill_runs_with_source(
+            self.hass, cfg.power_entity, cfg.energy_entity,
+            detector_config={
+                "start_threshold_w": cfg.start_threshold_w,
+                "start_duration_s": cfg.start_duration_s,
+                "end_threshold_w": cfg.end_threshold_w,
+                "end_duration_s": cfg.end_duration_s,
+            },
+            binary_entity=cfg.binary_entity, source=source,
+            lookback_days_stats=stats_days, lookback_days_raw=raw_days,
+        )
+
+        removed = 0
+        if mode == "replace":
+            kept = []
+            for r in self.store.runs:
+                start = dt_util.parse_datetime(r.start_time)
+                if r.source == "backfill" and start is not None and start >= window_start:
+                    removed += 1
+                    continue
+                kept.append(r)
+            self.store.runs = kept
+
+        spans = _run_spans(self.store.runs)
+        added = skipped_overlap = skipped_short = 0
+        for run in runs:
+            if run.duration_s < MIN_RUN_DURATION_MIN * 60:
+                skipped_short += 1
+                continue
+            if _overlaps(spans, run.start_time, run.end_time):
+                skipped_overlap += 1
+                continue
+            self.store.add_run(run.start_time, run.end_time, run.duration_s, run.energy_wh, source="backfill")
+            spans.append((run.start_time, run.end_time))
+            added += 1
+            _LOGGER.debug(
+                "[%s] backfill run: %s -> %s, %.0f min, %.0f Wh", cfg.name,
+                dt_util.as_local(run.start_time).isoformat(), dt_util.as_local(run.end_time).isoformat(),
+                run.duration_s / 60, run.energy_wh,
+            )
+        self.store.runs.sort(key=lambda r: r.start_time)
+        self.store.backfill_done = True
+        await self.store.async_save()
+
+        summary = {
+            "name": cfg.name, "source": used_source, "mode": mode,
+            "window_start": dt_util.as_local(window_start).isoformat(),
+            "found": len(runs), "removed": removed, "added": added,
+            "skipped_overlap": skipped_overlap, "skipped_short": skipped_short,
+            "total_runs": len(self.store.runs),
+        }
+        _LOGGER.debug("[%s] Backfill summary: %s", cfg.name, summary)
+        async_dispatcher_send(self.hass, f"{SIGNAL_RECOMMENDATION_UPDATED}_{self.entry.entry_id}")
+        return summary
+
     @callback
     def _handle_power_change(self, event: Event) -> None:
         new_state = event.data.get("new_state")
-        if new_state is None:
+        power_w = _parse_power(new_state.state if new_state else None)
+        if power_w is None:
             return
-        try:
-            power_w = float(new_state.state)
-        except (TypeError, ValueError):
+        self._feed_reading(dt_util.utcnow(), power_w)
+
+    @callback
+    def _feed_reading(self, timestamp: datetime, power_w: float) -> None:
+        self._last_power_w = power_w
+        result = self.detector.process_reading(timestamp, power_w)
+        self._schedule_tick()
+        if result is not None:
+            self.hass.async_create_task(self._async_handle_cycle_end(result))
+
+    @callback
+    def _cancel_tick(self) -> None:
+        if self._unsub_tick:
+            self._unsub_tick()
+            self._unsub_tick = None
+
+    @callback
+    def _schedule_tick(self) -> None:
+        self._cancel_tick()
+        deadline = self.detector.next_deadline()
+        if deadline is None and self.detector.state == DetectorState.RUNNING:
+            deadline = dt_util.utcnow() + timedelta(seconds=RUNNING_REFRESH_S)
+        if deadline is None:
             return
-        result = self.detector.process_reading(dt_util.utcnow(), power_w)
-        if result is None:
+        self._unsub_tick = async_track_point_in_utc_time(
+            self.hass, self._handle_tick, deadline + timedelta(seconds=1)
+        )
+
+    @callback
+    def _handle_tick(self, now: datetime) -> None:
+        self._unsub_tick = None
+        if self._last_power_w is None:
             return
-        self.hass.async_create_task(self._async_handle_cycle_end(result))
+        if self.detector.state != DetectorState.RUNNING:  # periodic refreshes stay quiet
+            _LOGGER.debug(
+                "[%s] No new reading since the detector entered %s -- re-evaluating with the last value (%.0f W)",
+                self.config.name, self.detector.state.value, self._last_power_w,
+            )
+        self._feed_reading(now, self._last_power_w)
 
     async def _async_handle_cycle_end(self, result) -> None:
         local_start = dt_util.as_local(result.start_time)
+        if result.duration_s < MIN_RUN_DURATION_MIN * 60:
+            _LOGGER.debug(
+                "[%s] Ignoring a %.1f min cycle starting %s: shorter than %d min, treated as noise",
+                self.config.name, result.duration_s / 60, local_start.isoformat(), MIN_RUN_DURATION_MIN,
+            )
+            self.last_cycle_trace = {
+                "start": local_start.isoformat(), "duration_min": round(result.duration_s / 60, 1),
+                "ignored": f"shorter than {MIN_RUN_DURATION_MIN} min",
+            }
+            return
         _LOGGER.debug(
             "[%s] Cycle finished: start %s, end %s, %.0f min, %.0f Wh (avg %.0f W)",
             self.config.name, local_start.isoformat(), dt_util.as_local(result.end_time).isoformat(),
@@ -364,18 +454,78 @@ def _forecast_curve(hass: HomeAssistant, forecast_entity: str | None, day_offset
     return {}
 
 
-def _typical_duration_hours(runs, kind: str) -> float:
-    durations = [r.duration_s / 3600 for r in runs if r.duration_s > 0]
-    if durations:
-        return sum(durations) / len(durations)
-    return APPLIANCE_KINDS.get(kind, APPLIANCE_KINDS["other"])["default_duration_min"] / 60
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
 
 
-def _typical_power_w(runs, duration_hours: float) -> float:
-    powers = [r.energy_wh / (r.duration_s / 3600) for r in runs if r.duration_s > 0 and r.energy_wh > 0]
+def _run_stats(runs, kind: str) -> dict:
+    spec = APPLIANCE_KINDS.get(kind, APPLIANCE_KINDS["other"])
+    min_s, max_s = MIN_RUN_DURATION_MIN * 60, spec["max_duration_min"] * 60
+    plausible = [r for r in runs if min_s <= r.duration_s <= max_s]
+    excluded = len(runs) - len(plausible)
+
+    if plausible:
+        duration_hours = _median([r.duration_s / 3600 for r in plausible])
+        duration_source = f"median of {len(plausible)} plausible run(s)"
+    else:
+        duration_hours = spec["default_duration_min"] / 60
+        duration_source = f"default for {kind}"
+
+    powers = [r.energy_wh / (r.duration_s / 3600) for r in plausible if r.energy_wh > 0]
     if powers:
-        return sum(powers) / len(powers)
-    return 0.0
+        avg_power_w = _median(powers)
+        power_source = f"median of {len(powers)} run(s) with measured energy"
+    else:
+        avg_power_w = float(spec["default_power_w"])
+        power_source = f"default for {kind} (no run has measured energy)"
+
+    return {
+        "duration_hours": duration_hours, "duration_source": duration_source,
+        "avg_power_w": avg_power_w, "power_source": power_source,
+        "runs_used": len(plausible), "runs_excluded": excluded,
+        "plausible_range_min": [MIN_RUN_DURATION_MIN, spec["max_duration_min"]],
+    }
+
+
+def _typical_duration_hours(runs, kind: str) -> float:
+    return _run_stats(runs, kind)["duration_hours"]
+
+
+def _typical_power_w(runs, duration_hours: float, kind: str = "other") -> float:
+    return _run_stats(runs, kind)["avg_power_w"]
+
+
+def _parse_power(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_spans(runs) -> list[tuple[datetime, datetime]]:
+    spans = []
+    for r in runs:
+        start, end = dt_util.parse_datetime(r.start_time), dt_util.parse_datetime(r.end_time)
+        if start is not None and end is not None:
+            spans.append((start, end))
+    return spans
+
+
+def _overlaps(spans: list[tuple[datetime, datetime]], start: datetime, end: datetime) -> bool:
+    return any(start < s_end and s_start < end for s_start, s_end in spans)
+
+
+def _basis(reason: str, day_best_hour: int, final_hour: int) -> str:
+    if reason.startswith("Best fit for tomorrow"):
+        text = f"Best fit for tomorrow around {final_hour:02d}:00."
+    else:
+        text = reason
+    if final_hour != day_best_hour:
+        text += (f" Moved from {day_best_hour:02d}:00 to {final_hour:02d}:00 to share the solar "
+                 f"surplus with other appliances.")
+    return text
 
 
 async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
@@ -418,8 +568,9 @@ async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
             continue
 
         urgency_info = scheduler.compute_urgency(runtime.store.runs, today)
-        duration_hours = _typical_duration_hours(runtime.store.runs, cfg.kind)
-        avg_power_w = _typical_power_w(runtime.store.runs, duration_hours)
+        stats = _run_stats(runtime.store.runs, cfg.kind)
+        duration_hours = stats["duration_hours"]
+        avg_power_w = stats["avg_power_w"]
         trace["urgency"] = {
             "urgency": round(urgency_info.urgency, 4),
             "typical_interval_days": round(urgency_info.typical_interval_days, 2),
@@ -427,11 +578,13 @@ async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
         }
         trace["duration_hours"] = round(duration_hours, 3)
         trace["avg_power_w"] = round(avg_power_w, 1)
+        trace["run_stats"] = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in stats.items()}
         _LOGGER.debug(
             "[%s] Step 2 -- urgency=%.3f (days since last run=%s, typical interval=%.2f d); "
-            "typical duration=%.2f h; avg power=%.0f W",
+            "typical duration=%.2f h (%s); avg power=%.0f W (%s); %d run(s) outside %d-%d min excluded",
             name, urgency_info.urgency, urgency_info.days_since_last,
-            urgency_info.typical_interval_days, duration_hours, avg_power_w,
+            urgency_info.typical_interval_days, duration_hours, stats["duration_source"],
+            avg_power_w, stats["power_source"], stats["runs_excluded"], *stats["plausible_range_min"],
         )
 
         day_best: dict[int, tuple[int, float]] = {}
@@ -495,6 +648,7 @@ async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
             "cfg": cfg, "runtime": runtime, "urgency_info": urgency_info,
             "duration_hours": duration_hours, "avg_power_w": avg_power_w,
             "target_date": target_date, "reason": reason,
+            "day_best_hour": day_best[chosen_offset][0],
             "blended_scores": day_blended[chosen_offset], "hours": hours,
             "forecast": forecasts.get(chosen_offset, {}),
             "confidence": "personalized" if runtime.store.ml_model and runtime.store.ml_model.get("promoted") else "baseline",
@@ -539,6 +693,7 @@ async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
             runtime = info["runtime"]
             name = info["cfg"].name
             hour, _adj_score = assignment[eid]
+            basis = _basis(info["reason"], info["day_best_hour"], hour)
 
             habit = scheduler.habit_scores(runtime.store.runs, target_date, info["hours"])
             solar = scheduler.solar_alignment_scores(info["forecast"], info["duration_hours"], info["hours"])
@@ -562,7 +717,7 @@ async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
                 "expected_coverage_pct": coverage_pct,
                 "heuristic_score": round(heuristic_score_here, 4),
                 "confidence": info["confidence"],
-                "basis": info["reason"],
+                "basis": basis,
                 "ml_features": [round(f, 4) for f in features],
             }
             _LOGGER.debug(
@@ -574,12 +729,12 @@ async def async_run_daily_scheduling(hass: HomeAssistant) -> None:
 
             suggestion = runtime.store.add_suggestion(
                 target_date=target_date, suggested_hour=hour,
-                expected_coverage_pct=coverage_pct, confidence=info["confidence"], basis=info["reason"],
+                expected_coverage_pct=coverage_pct, confidence=info["confidence"], basis=basis,
                 features=features, heuristic_score=heuristic_score_here,
             )
             runtime.latest_recommendation = {
                 "target_date": target_date, "hour": hour,
-                "expected_coverage_pct": coverage_pct, "confidence": info["confidence"], "basis": info["reason"],
+                "expected_coverage_pct": coverage_pct, "confidence": info["confidence"], "basis": basis,
             }
             async_dispatcher_send(hass, f"{SIGNAL_RECOMMENDATION_UPDATED}_{eid}")
 
