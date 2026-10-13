@@ -21,7 +21,12 @@
     "step": {
       "init": {
         "title": "Ustawienia Energy Optimizer",
+        "description": "Czujniki można tu zmienić w dowolnym momencie. Po zmianie czujnika energii, czujnika binarnego albo progów detekcji uruchom akcję energy_optimizer.rerun_backfill, żeby odtworzyć historię z nowymi ustawieniami.",
         "data": {
+          "power_entity": "Czujnik mocy (W)",
+          "energy_entity": "Czujnik energii (kWh, opcjonalny)",
+          "solar_forecast_entity": "Encja prognozy produkcji PV (opcjonalna)",
+          "binary_entity": "Czujnik binarny „pracuje” (opcjonalny)",
           "start_threshold_w": "Próg startu (W)",
           "start_duration_s": "Czas potwierdzenia startu (s)",
           "end_threshold_w": "Próg zakończenia (W)",

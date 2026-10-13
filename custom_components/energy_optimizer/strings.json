@@ -21,7 +21,12 @@
     "step": {
       "init": {
         "title": "Energy Optimizer settings",
+        "description": "Sensors can be changed here at any time. After changing the energy sensor, the binary sensor or the detection thresholds, run the energy_optimizer.rerun_backfill action to rebuild the history with the new settings.",
         "data": {
+          "power_entity": "Power sensor (W)",
+          "energy_entity": "Energy sensor (kWh, optional)",
+          "solar_forecast_entity": "Solar forecast entity (optional)",
+          "binary_entity": "\"Is running\" binary sensor (optional)",
           "start_threshold_w": "Start threshold (W)",
           "start_duration_s": "Start confirm duration (s)",
           "end_threshold_w": "End threshold (W)",

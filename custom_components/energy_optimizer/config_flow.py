@@ -40,6 +40,13 @@ from .const import (
     DEFAULT_PREF_WEIGHT,
 )
 
+CLEARABLE_ENTITY_KEYS = (CONF_ENERGY_ENTITY, CONF_SOLAR_FORECAST_ENTITY, CONF_BINARY_ENTITY)
+
+def current_entity(entry: config_entries.ConfigEntry, key: str) -> str | None:
+    if key in entry.options:
+        return entry.options[key] or None
+    return entry.data.get(key) or None
+
 
 class EnergyOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
@@ -87,10 +94,35 @@ class EnergyOptimizerOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
+            for key in CLEARABLE_ENTITY_KEYS:
+                user_input[key] = user_input.get(key) or None
             return self.async_create_entry(title="", data=user_input)
 
-        opts = self.config_entry.options
+        entry = self.config_entry
+        opts = entry.options
+
+        def suggested(key: str) -> dict:
+            value = current_entity(entry, key)
+            return {"suggested_value": value} if value else {}
+
         schema = vol.Schema({
+            vol.Required(
+                CONF_POWER_ENTITY, default=current_entity(entry, CONF_POWER_ENTITY)
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="power")
+            ),
+            vol.Optional(
+                CONF_ENERGY_ENTITY, description=suggested(CONF_ENERGY_ENTITY)
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="energy")
+            ),
+            vol.Optional(
+                CONF_SOLAR_FORECAST_ENTITY, description=suggested(CONF_SOLAR_FORECAST_ENTITY)
+            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            vol.Optional(
+                CONF_BINARY_ENTITY, description=suggested(CONF_BINARY_ENTITY)
+            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="binary_sensor")),
+            # --- cycle detection ---
             vol.Optional(
                 CONF_START_THRESHOLD_W, default=opts.get(CONF_START_THRESHOLD_W, DEFAULT_START_THRESHOLD_W)
             ): vol.Coerce(float),
@@ -103,40 +135,23 @@ class EnergyOptimizerOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_END_DURATION_S, default=opts.get(CONF_END_DURATION_S, DEFAULT_END_DURATION_S)
             ): vol.Coerce(int),
+            # --- scheduling ---
             vol.Optional(
-                CONF_BINARY_ENTITY, default=opts.get(CONF_BINARY_ENTITY, None)
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="binary_sensor")),
-            vol.Optional(
-                CONF_ALLOWED_START,
-                default=opts.get(
-                    CONF_ALLOWED_START,
-                    DEFAULT_ALLOWED_START,
-                ),
+                CONF_ALLOWED_START, default=opts.get(CONF_ALLOWED_START, DEFAULT_ALLOWED_START),
             ): selector.TimeSelector(),
             vol.Optional(
-                CONF_ALLOWED_END,
-                default=opts.get(
-                    CONF_ALLOWED_END,
-                    DEFAULT_ALLOWED_END,
-                ),
+                CONF_ALLOWED_END, default=opts.get(CONF_ALLOWED_END, DEFAULT_ALLOWED_END),
             ): selector.TimeSelector(),
             vol.Optional(
-                CONF_QUIET_START,
-                default=opts.get(
-                    CONF_QUIET_START,
-                    DEFAULT_QUIET_START,
-                ),
+                CONF_QUIET_START, default=opts.get(CONF_QUIET_START, DEFAULT_QUIET_START),
             ): selector.TimeSelector(),
             vol.Optional(
-                CONF_QUIET_END,
-                default=opts.get(
-                    CONF_QUIET_END,
-                    DEFAULT_QUIET_END,
-                ),
+                CONF_QUIET_END, default=opts.get(CONF_QUIET_END, DEFAULT_QUIET_END),
             ): selector.TimeSelector(),
             vol.Optional(
                 CONF_PREF_WEIGHT, default=opts.get(CONF_PREF_WEIGHT, DEFAULT_PREF_WEIGHT)
             ): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
+            # --- notifications ---
             vol.Optional(
                 CONF_NOTIFY_TARGETS, default=opts.get(CONF_NOTIFY_TARGETS, [])
             ): selector.EntitySelector(selector.EntitySelectorConfig(domain="notify", multiple=True)),

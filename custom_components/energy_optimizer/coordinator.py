@@ -322,15 +322,21 @@ def _recommendation_from_suggestion(suggestion) -> dict | None:
         return None
 
 
+def _entity_from_entry(entry: ConfigEntry, key: str) -> str | None:
+    if key in entry.options:
+        return entry.options[key] or None
+    return entry.data.get(key) or None
+
+
 def _config_from_entry(entry: ConfigEntry) -> ApplianceConfig:
     data, opts = entry.data, entry.options
     return ApplianceConfig(
         entry_id=entry.entry_id,
         name=data.get(CONF_NAME) or entry.title,
         kind=data.get(CONF_APPLIANCE_KIND, "other"),
-        power_entity=data[CONF_POWER_ENTITY],
-        energy_entity=data.get(CONF_ENERGY_ENTITY),
-        solar_forecast_entity=data.get(CONF_SOLAR_FORECAST_ENTITY),
+        power_entity=_entity_from_entry(entry, CONF_POWER_ENTITY),
+        energy_entity=_entity_from_entry(entry, CONF_ENERGY_ENTITY),
+        solar_forecast_entity=_entity_from_entry(entry, CONF_SOLAR_FORECAST_ENTITY),
         start_threshold_w=opts.get(CONF_START_THRESHOLD_W, DEFAULT_START_THRESHOLD_W),
         start_duration_s=opts.get(CONF_START_DURATION_S, DEFAULT_START_DURATION_S),
         end_threshold_w=opts.get(CONF_END_THRESHOLD_W, DEFAULT_END_THRESHOLD_W),
@@ -343,7 +349,7 @@ def _config_from_entry(entry: ConfigEntry) -> ApplianceConfig:
         notify_targets=opts.get(CONF_NOTIFY_TARGETS, []),
         notify_action=opts.get(CONF_NOTIFY_ACTION, []),
         fire_events=opts.get(CONF_FIRE_EVENTS, True),
-        binary_entity=opts.get(CONF_BINARY_ENTITY) or None,
+        binary_entity=_entity_from_entry(entry, CONF_BINARY_ENTITY),
     )
 
 
