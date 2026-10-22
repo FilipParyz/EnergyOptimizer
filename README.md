@@ -1,5 +1,8 @@
 # Energy Optimizer
 
+[![HACS Validation](https://github.com/FilipParyz/EnergyOptimizer/actions/workflows/hacs.yml/badge.svg)](https://github.com/FilipParyz/EnergyOptimizer/actions/workflows/hacs.yml)
+[![Validate with hassfest](https://github.com/FilipParyz/EnergyOptimizer/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/FilipParyz/EnergyOptimizer/actions/workflows/hassfest.yaml)
+
 A Home Assistant custom integration (install via HACS as a custom
 repository) that learns when you usually run the dishwasher, washing
 machine, or dryer, and recommends the best time to start it tomorrow --
