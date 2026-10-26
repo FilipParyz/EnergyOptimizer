@@ -103,14 +103,10 @@ async def fetch_actual_solar_production(
     if not meta_list:
         return {}
 
-    meta = meta_list[0]
-    unit = meta.get("unit_of_measurement") if isinstance(meta, dict) else getattr(meta, "unit_of_measurement", None)
-    to_wh = 1000.0 if unit == "kWh" else 1.0
-
     end = dt_util.utcnow()
     start = end - timedelta(days=days)
     stats = await get_instance(hass).async_add_executor_job(
-        statistics_during_period, hass, start, end, {solar_energy_entity}, "hour", None, {"sum"},
+        statistics_during_period, hass, start, end, {solar_energy_entity}, "hour", {"energy": "Wh"}, {"sum"},
     )
     rows = stats.get(solar_energy_entity, [])
 
@@ -122,7 +118,7 @@ async def fetch_actual_solar_production(
         if cur_sum is None or prev_sum is None:
             prev_sum = cur_sum
             continue
-        wh = max(0.0, (cur_sum - prev_sum) * to_wh)
+        wh = max(0.0, (cur_sum - prev_sum))
         prev_sum = cur_sum
         by_date.setdefault(row_start.date(), {})[row_start.hour] = wh
     return by_date
