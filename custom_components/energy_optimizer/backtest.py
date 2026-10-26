@@ -73,12 +73,17 @@ def backtest_appliance(
         best_coverage = max(
             scheduler.expected_solar_coverage_pct(solar_today, h, duration_hours, avg_power_w) for h in hours
         )
+        actual_coverage = scheduler.expected_solar_coverage_pct(
+            solar_today, actual_dt.hour, duration_hours, avg_power_w
+        )
 
         results.append(BacktestResult(
             eval_date=eval_date, recommended_hour=rec_hour, actual_hour=actual_dt.hour,
             matched=abs(rec_hour - actual_dt.hour) <= 1,
             recommended_coverage_pct=rec_coverage, best_possible_coverage_pct=best_coverage,
             regret_pct=max(0.0, best_coverage - rec_coverage),
+            actual_coverage_pct=actual_coverage,
+            gain_pct=rec_coverage - actual_coverage,
         ))
     return results
 
@@ -93,6 +98,8 @@ def summarize(results: list[BacktestResult]) -> dict:
         "mean_recommended_coverage_pct": sum(r.recommended_coverage_pct for r in results) / n,
         "mean_best_possible_coverage_pct": sum(r.best_possible_coverage_pct for r in results) / n,
         "mean_regret_pct": sum(r.regret_pct for r in results) / n,
+        "mean_actual_coverage_pct": sum(r.actual_coverage_pct for r in results) / n,
+        "mean_gain_pct": sum(r.gain_pct for r in results) / n,
     }
 
 
