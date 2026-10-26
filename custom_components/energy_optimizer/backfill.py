@@ -110,13 +110,8 @@ async def _backfill_from_statistics(hass: HomeAssistant, energy_entity: str,
     if not meta_list:
         return []
 
-    meta = meta_list[0]
-    unit = meta.get("unit_of_measurement") if isinstance(meta, dict) else getattr(meta, "unit_of_measurement", None)
-    # Hourly bucket values are treated as Wh for that hour; convert kWh sources.
-    to_wh = 1000.0 if unit == "kWh" else 1.0
-
     stats = await get_instance(hass).async_add_executor_job(
-        statistics_during_period, hass, start, end, {energy_entity}, "hour", None, {"sum"},
+        statistics_during_period, hass, start, end, {energy_entity}, "hour", {"energy": "Wh"}, {"sum"},
     )
     rows = stats.get(energy_entity, [])
 
@@ -147,7 +142,7 @@ async def _backfill_from_statistics(hass: HomeAssistant, energy_entity: str,
             continue
         # `sum` is reset-compensated by the recorder itself, so a plain diff
         # between consecutive hourly buckets is safe even across meter resets.
-        wh = (cur_sum - prev_sum) * to_wh
+        wh = (cur_sum - prev_sum)
         prev_sum = cur_sum
         if wh > IDLE_ENERGY_WH:
             if active_start is None:
