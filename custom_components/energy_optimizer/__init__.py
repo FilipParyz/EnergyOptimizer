@@ -268,9 +268,15 @@ async def _run_backtest_service(hass: HomeAssistant, call: ServiceCall) -> None:
         if not hours:
             continue
 
+        run_days = _distinct_run_days(runtime.store.runs)
         duration_hours = _typical_duration_hours(runtime.store.runs, cfg.kind)
         avg_power_w = _typical_power_w(runtime.store.runs, duration_hours, cfg.kind)
-        run_days = _distinct_run_days(runtime.store.runs)
+        sample_day = max(actual_solar)
+        _LOGGER.debug(
+            "%s: duration_hours=%.2f avg_power_w=%.0f needed_wh=%.0f | solar %s: %s",
+            cfg.name, duration_hours, avg_power_w, duration_hours * avg_power_w,
+            sample_day, {h: round(v) for h, v in sorted(actual_solar.get(sample_day, {}).items())},
+        )
 
         results = backtest.backtest_appliance(
             runtime.store.runs, actual_solar, duration_hours, avg_power_w, hours,
@@ -285,30 +291,33 @@ async def _run_backtest_service(hass: HomeAssistant, call: ServiceCall) -> None:
                 cfg.name, run_days, len(runtime.store.runs), min_history_days,
             )
             rows.append(
-                f"| {cfg.name} | {run_days} (need > {min_history_days}) | not enough history yet | - | - | - |"
+                f"| {cfg.name} | {run_days} (need > {min_history_days}) | not enough history yet | - | - | - | - | - |"
             )
             continue
 
         any_results = True
         _LOGGER.info(
             "%s: backtest over %d day(s) -- match rate %.0f%%, mean recommended "
-            "coverage %.0f%%, mean best-possible coverage %.0f%%, mean regret %.1fpp",
+            "coverage %.0f%%, mean best-possible coverage %.0f%%, mean regret %.1fpp, "
+            "mean actual coverage %.0f%%, mean gain %+.1fpp",
             cfg.name, summary["n_days"], summary["match_rate"] * 100,
             summary["mean_recommended_coverage_pct"], summary["mean_best_possible_coverage_pct"],
-            summary["mean_regret_pct"],
+            summary["mean_regret_pct"], summary["mean_actual_coverage_pct"], summary["mean_gain_pct"],
         )
         rows.append(
             f"| {cfg.name} | {summary['n_days']} | {summary['match_rate'] * 100:.0f}% | "
             f"{summary['mean_regret_pct']:.1f} pp | {summary['mean_recommended_coverage_pct']:.0f}% | "
-            f"{summary['mean_best_possible_coverage_pct']:.0f}% |"
+            f"{summary['mean_best_possible_coverage_pct']:.0f}% | "
+            f"{summary['mean_actual_coverage_pct']:.0f}% | {summary['mean_gain_pct']:+.1f} pp |"
         )
 
     if not rows:
         message = "No configured appliances have an allowed scheduling window; nothing to backtest."
     else:
         header = (
-            "| Appliance | Days evaluated | Match rate | Mean regret | Recommended coverage | Best possible coverage |\n"
-            "|---|---|---|---|---|---|"
+            "| Appliance | Days evaluated | Match rate | Mean regret | Recommended coverage "
+            "| Best possible coverage | Actual coverage | Mean gain |\n"
+            "|---|---|---|---|---|---|---|---|"
         )
         message = header + "\n" + "\n".join(rows)
         if not any_results:

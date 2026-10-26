@@ -35,6 +35,8 @@ class BacktestResult:
     recommended_coverage_pct: float
     best_possible_coverage_pct: float
     regret_pct: float
+    actual_coverage_pct: float
+    gain_pct: float
 
 
 def backtest_appliance(
@@ -71,12 +73,17 @@ def backtest_appliance(
         best_coverage = max(
             scheduler.expected_solar_coverage_pct(solar_today, h, duration_hours, avg_power_w) for h in hours
         )
+        actual_coverage = scheduler.expected_solar_coverage_pct(
+            solar_today, actual_dt.hour, duration_hours, avg_power_w
+        )
 
         results.append(BacktestResult(
             eval_date=eval_date, recommended_hour=rec_hour, actual_hour=actual_dt.hour,
             matched=abs(rec_hour - actual_dt.hour) <= 1,
             recommended_coverage_pct=rec_coverage, best_possible_coverage_pct=best_coverage,
             regret_pct=max(0.0, best_coverage - rec_coverage),
+            actual_coverage_pct=actual_coverage,
+            gain_pct=rec_coverage - actual_coverage,
         ))
     return results
 
@@ -91,6 +98,8 @@ def summarize(results: list[BacktestResult]) -> dict:
         "mean_recommended_coverage_pct": sum(r.recommended_coverage_pct for r in results) / n,
         "mean_best_possible_coverage_pct": sum(r.best_possible_coverage_pct for r in results) / n,
         "mean_regret_pct": sum(r.regret_pct for r in results) / n,
+        "mean_actual_coverage_pct": sum(r.actual_coverage_pct for r in results) / n,
+        "mean_gain_pct": sum(r.gain_pct for r in results) / n,
     }
 
 
@@ -103,14 +112,10 @@ async def fetch_actual_solar_production(
     if not meta_list:
         return {}
 
-    meta = meta_list[0]
-    unit = meta.get("unit_of_measurement") if isinstance(meta, dict) else getattr(meta, "unit_of_measurement", None)
-    to_wh = 1000.0 if unit == "kWh" else 1.0
-
     end = dt_util.utcnow()
     start = end - timedelta(days=days)
     stats = await get_instance(hass).async_add_executor_job(
-        statistics_during_period, hass, start, end, {solar_energy_entity}, "hour", None, {"sum"},
+        statistics_during_period, hass, start, end, {solar_energy_entity}, "hour", {"energy": "Wh"}, {"sum"},
     )
     rows = stats.get(solar_energy_entity, [])
 
@@ -122,7 +127,7 @@ async def fetch_actual_solar_production(
         if cur_sum is None or prev_sum is None:
             prev_sum = cur_sum
             continue
-        wh = max(0.0, (cur_sum - prev_sum) * to_wh)
+        wh = max(0.0, (cur_sum - prev_sum))
         prev_sum = cur_sum
         by_date.setdefault(row_start.date(), {})[row_start.hour] = wh
     return by_date
