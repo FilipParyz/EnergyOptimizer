@@ -82,16 +82,23 @@ def compute_urgency(runs, today: date) -> UrgencyInfo:
     return UrgencyInfo(urgency=urgency, typical_interval_days=typical, days_since_last=days_since_last)
 
 
+def window_solar_wh(forecast_watts: dict[int, float], hour: int, duration_hours: float) -> float:
+    if duration_hours <= 0:
+        return 0.0
+    full_hours = int(duration_hours)
+    fraction = duration_hours - full_hours
+    total = sum(forecast_watts.get((hour + i) % 24, 0.0) for i in range(full_hours))
+    if fraction > 0:
+        total += fraction * forecast_watts.get((hour + full_hours) % 24, 0.0)
+    return total
+
+
 def solar_alignment_scores(forecast_watts: dict[int, float], duration_hours: float,
                              hours: list[int]) -> dict[int, float]:
     if not forecast_watts or sum(forecast_watts.values()) <= 0:
         return {h: 0.0 for h in hours}
 
-    span = max(1, round(duration_hours))
-    raw = {}
-    for h in hours:
-        window = [forecast_watts.get((h + i) % 24, 0.0) for i in range(span)]
-        raw[h] = sum(window) / span
+    raw = {h: window_solar_wh(forecast_watts, h, duration_hours) for h in hours}
     peak = max(raw.values()) or 1.0
     return {h: v / peak for h, v in raw.items()}
 
@@ -100,11 +107,8 @@ def expected_solar_coverage_pct(forecast_watts: dict[int, float], hour: int,
                                   duration_hours: float, avg_power_w: float) -> float:
     if avg_power_w <= 0 or duration_hours <= 0:
         return 0.0
-    span = max(1, round(duration_hours))
-    available_wh = sum(forecast_watts.get((hour + i) % 24, 0.0) for i in range(span))
+    available_wh = window_solar_wh(forecast_watts, hour, duration_hours)
     needed_wh = avg_power_w * duration_hours
-    if needed_wh <= 0:
-        return 0.0
     return max(0.0, min(100.0, available_wh / needed_wh * 100))
 
 
