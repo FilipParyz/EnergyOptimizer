@@ -268,9 +268,15 @@ async def _run_backtest_service(hass: HomeAssistant, call: ServiceCall) -> None:
         if not hours:
             continue
 
+        run_days = _distinct_run_days(runtime.store.runs)
         duration_hours = _typical_duration_hours(runtime.store.runs, cfg.kind)
         avg_power_w = _typical_power_w(runtime.store.runs, duration_hours, cfg.kind)
-        run_days = _distinct_run_days(runtime.store.runs)
+        sample_day = max(actual_solar)
+        _LOGGER.warning(
+            "%s: duration_hours=%.2f avg_power_w=%.0f needed_wh=%.0f | solar %s: %s",
+            cfg.name, duration_hours, avg_power_w, duration_hours * avg_power_w,
+            sample_day, {h: round(v) for h, v in sorted(actual_solar.get(sample_day, {}).items())},
+        )
 
         results = backtest.backtest_appliance(
             runtime.store.runs, actual_solar, duration_hours, avg_power_w, hours,
