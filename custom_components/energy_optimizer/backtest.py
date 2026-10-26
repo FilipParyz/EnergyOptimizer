@@ -35,6 +35,8 @@ class BacktestResult:
     recommended_coverage_pct: float
     best_possible_coverage_pct: float
     regret_pct: float
+    actual_coverage_pct: float
+    gain_pct: float
 
 
 def backtest_appliance(
