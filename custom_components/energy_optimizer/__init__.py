@@ -40,7 +40,8 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     await hass.http.async_register_static_paths(
         [StaticPathConfig(CARD_URL, str(card_path), cache_headers=False)]
     )
-    add_extra_js_url(hass, CARD_URL)
+    mtime = int((await hass.async_add_executor_job(card_path.stat)).st_mtime)
+    add_extra_js_url(hass, f"{CARD_URL}?v={mtime}")
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -145,10 +146,12 @@ async def _accept_via_entry_id(hass: HomeAssistant, entry_id: str) -> None:
         return
     pending = runtime.store.latest_pending_suggestion()
     if not pending:
+        _LOGGER.info("%s: accept_suggestion ignored -- no pending suggestion", runtime.config.name)
         return
     pending.status = "accepted"
     pending.resolved_at = dt_util.now().isoformat()
     await runtime.store.async_save()
+    runtime.notify_updated()
     if runtime.config.fire_events:
         hass.bus.async_fire(EVENT_SUGGESTION_ACCEPTED, {"entry_id": entry_id, "name": runtime.config.name})
 
@@ -158,10 +161,13 @@ async def _change_via_entry_id(hass: HomeAssistant, entry_id: str) -> None:
     if not runtime:
         return
     pending = runtime.store.latest_pending_suggestion()
-    if pending:
-        pending.status = "overridden"
-        pending.resolved_at = dt_util.now().isoformat()
+    if not pending:
+        _LOGGER.info("%s: pick_different_time ignored -- no pending suggestion", runtime.config.name)
+        return
+    pending.status = "overridden"
+    pending.resolved_at = dt_util.now().isoformat()
     await runtime.store.async_save()
+    runtime.notify_updated()
     if runtime.config.fire_events:
         hass.bus.async_fire(EVENT_SUGGESTION_OVERRIDDEN, {"entry_id": entry_id, "name": runtime.config.name})
 

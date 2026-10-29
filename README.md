@@ -73,15 +73,30 @@ type: custom:energy-optimizer-card
 entity: sensor.dishwasher_recommended_start
 ```
 
-The card shows the recommended start time, expected solar coverage and
-confidence, plus **Accept** / **Pick different time** buttons that call the
-services below.
+The card shows:
+
+- whether the appliance is **idle or running** right now (with start time and
+  live power), and whether the current run falls **within the suggested
+  window** (suggested hour ±1 h, the same rule used to resolve suggestions);
+- the recommended start time, expected solar coverage, confidence and the
+  suggestion's status (waiting, accepted, started as suggested, started
+  outside the suggestion, different time chosen, not started);
+- the **last run** -- when, how long, how much energy, and whether it was
+  inside the suggested window;
+- **Accept** / **Pick different time** buttons (only while a suggestion is
+  waiting for a decision) that call the services below and confirm with a
+  toast. Tapping the rest of the card opens the entity's details.
+
+Optional settings: `name`, `icon`. The card follows the Home Assistant
+language (Polish and English).
 
 ## Entities & services
 
 - `sensor.<appliance>_recommended_start` -- a timestamp, with
   `expected_solar_coverage_pct`, `confidence` (`baseline`/`personalized`),
-  `basis`, and `sample_count` attributes.
+  `basis`, `sample_count`, `suggestion_status`, `appliance_state`
+  (`idle`/`running`), `running_since`, `current_run_fit`, `last_run` and
+  `power_entity` attributes.
 - `energy_optimizer.accept_suggestion` / `energy_optimizer.pick_different_time`
   -- called by the dashboard card's buttons or a mobile notification action;
   resolve the current pending suggestion and feed the personalization model.
