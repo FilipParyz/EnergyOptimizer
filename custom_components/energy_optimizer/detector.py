@@ -46,6 +46,14 @@ class CycleDetector:
         self._energy_wh = 0.0
         self._last_reading: tuple[datetime, float] | None = None
 
+    @property
+    def is_running(self) -> bool:
+        return self.state in (DetectorState.RUNNING, DetectorState.ENDING)
+
+    @property
+    def cycle_start(self) -> datetime | None:
+        return self._cycle_start
+
     def next_deadline(self) -> datetime | None:
         if self._state_since is None:
             return None

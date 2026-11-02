@@ -62,12 +62,17 @@ class RecommendedStartSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        rec = self._runtime.latest_recommendation
-        if not rec:
-            return {"sample_count": len(self._runtime.store.runs)}
-        return {
-            "expected_solar_coverage_pct": rec["expected_coverage_pct"],
-            "confidence": rec["confidence"],
-            "basis": rec["basis"],
-            "sample_count": len(self._runtime.store.runs),
+        runtime = self._runtime
+        attrs = {
+            "sample_count": len(runtime.store.runs),
+            "power_entity": runtime.config.power_entity,
+            **runtime.status_snapshot(),
         }
+        rec = runtime.latest_recommendation
+        if rec:
+            attrs.update({
+                "expected_solar_coverage_pct": rec["expected_coverage_pct"],
+                "confidence": rec["confidence"],
+                "basis": rec["basis"],
+            })
+        return attrs

@@ -101,6 +101,49 @@ class ApplianceRuntime:
         if not self.store.backfill_done:
             self.hass.async_create_task(self._async_backfill())
 
+    @callback
+    def notify_updated(self) -> None:
+        async_dispatcher_send(self.hass, f"{SIGNAL_RECOMMENDATION_UPDATED}_{self.entry.entry_id}")
+
+    def status_snapshot(self) -> dict:
+        snap: dict = {
+            "appliance_state": "running" if self.detector.is_running else "idle",
+            "running_since": None,
+            "current_run_fit": None,
+            "suggestion_status": self.store.suggestions[-1].status if self.store.suggestions else None,
+            "last_run": None,
+        }
+        start = self.detector.cycle_start
+        if self.detector.is_running and start is not None:
+            local_start = dt_util.as_local(start)
+            snap["running_since"] = local_start.isoformat()
+            snap["current_run_fit"] = self._run_fit(local_start)
+
+        parsed = [(r, dt_util.parse_datetime(r.start_time)) for r in self.store.runs]
+        parsed = [(r, dt) for r, dt in parsed if dt is not None]
+        if parsed:
+            run, run_start = max(parsed, key=lambda p: p[1])
+            local_start = dt_util.as_local(run_start)
+            snap["last_run"] = {
+                "start": local_start.isoformat(),
+                "end": run.end_time,
+                "duration_min": round(run.duration_s / 60),
+                "energy_wh": round(run.energy_wh),
+                "source": run.source,
+                **self._run_fit(local_start),
+            }
+        return snap
+
+    def _run_fit(self, local_start: datetime) -> dict:
+        suggestion = self.store.same_day_suggestion(local_start)
+        if suggestion is None:
+            return {"fit": "no_suggestion", "suggested_hour": None}
+        in_window = abs(local_start.hour - suggestion.suggested_hour) <= 1
+        return {
+            "fit": "in_window" if in_window else "outside_window",
+            "suggested_hour": suggestion.suggested_hour,
+        }
+
     async def async_unload(self) -> None:
         if self._unsub_state:
             self._unsub_state()
@@ -174,7 +217,7 @@ class ApplianceRuntime:
             "total_runs": len(self.store.runs),
         }
         _LOGGER.debug("[%s] Backfill summary: %s", cfg.name, summary)
-        async_dispatcher_send(self.hass, f"{SIGNAL_RECOMMENDATION_UPDATED}_{self.entry.entry_id}")
+        self.notify_updated()
         return summary
 
     @callback
@@ -188,8 +231,11 @@ class ApplianceRuntime:
     @callback
     def _feed_reading(self, timestamp: datetime, power_w: float) -> None:
         self._last_power_w = power_w
+        was_running = self.detector.is_running
         result = self.detector.process_reading(timestamp, power_w)
         self._schedule_tick()
+        if self.detector.is_running != was_running:
+            self.notify_updated()
         if result is not None:
             self.hass.async_create_task(self._async_handle_cycle_end(result))
 
@@ -251,7 +297,7 @@ class ApplianceRuntime:
             "reconcile": reconcile,
         }
         await self.store.async_save()
-        async_dispatcher_send(self.hass, f"{SIGNAL_RECOMMENDATION_UPDATED}_{self.entry.entry_id}")
+        self.notify_updated()
         if self.config.fire_events:
             self.hass.bus.async_fire(EVENT_CYCLE_ENDED, {
                 "entry_id": self.entry.entry_id,
